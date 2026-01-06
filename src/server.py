@@ -1109,6 +1109,103 @@ def export_session(
         return "\n".join(lines)
 
 
+@mcp.tool(
+    description="Get brief summaries for multiple sessions - title + first user request only. Use for summarization instead of get_session to avoid context explosion."
+)
+def get_session_briefs(
+    session_ids: Optional[List[str]] = None,
+    project_id: Optional[str] = None,
+    date: Optional[str] = None,
+    limit: int = 20,
+    max_request_chars: int = 300,
+) -> Dict[str, Any]:
+    init_db()
+
+    with get_db() as conn:
+        if session_ids:
+            placeholders = ",".join("?" * len(session_ids))
+            rows = conn.execute(
+                f"SELECT * FROM sessions WHERE id IN ({placeholders}) ORDER BY updated DESC LIMIT ?",
+                [*session_ids, limit],
+            ).fetchall()
+        else:
+            conditions = []
+            params: List[Any] = []
+
+            if project_id:
+                conditions.append("project_id = ?")
+                params.append(project_id)
+
+            if date:
+                try:
+                    date_from, date_to = parse_date_filter(date)
+                    conditions.append("updated >= ?")
+                    params.append(date_from)
+                    conditions.append("updated <= ?")
+                    params.append(date_to)
+                except ValueError as e:
+                    return {"error": str(e)}
+
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            rows = conn.execute(
+                f"SELECT * FROM sessions WHERE {where_clause} ORDER BY updated DESC LIMIT ?",
+                [*params, limit],
+            ).fetchall()
+
+        briefs = []
+        for row in rows:
+            session_id = row["id"]
+
+            first_user_msg = conn.execute(
+                "SELECT id FROM messages WHERE session_id = ? AND role = 'user' ORDER BY created ASC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+
+            user_request = ""
+            if first_user_msg:
+                text_parts = conn.execute(
+                    "SELECT content FROM parts WHERE message_id = ? AND type = 'text' ORDER BY id ASC",
+                    (first_user_msg["id"],),
+                ).fetchall()
+
+                user_request = " ".join(p["content"] for p in text_parts)
+                if len(user_request) > max_request_chars:
+                    user_request = user_request[:max_request_chars] + "..."
+
+            msg_count = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)
+            ).fetchone()[0]
+
+            briefs.append(
+                {
+                    "id": session_id,
+                    "title": row["title"],
+                    "directory": row["directory"],
+                    "project_id": row["project_id"],
+                    "updated": row["updated"],
+                    "updated_human": datetime.fromtimestamp(
+                        row["updated"] / 1000
+                    ).isoformat()
+                    if row["updated"]
+                    else None,
+                    "user_request": user_request.strip()
+                    if user_request
+                    else "(no user message)",
+                    "stats": {
+                        "messages": msg_count,
+                        "additions": row["additions"],
+                        "deletions": row["deletions"],
+                        "files": row["files_changed"],
+                    },
+                }
+            )
+
+    return {
+        "briefs": briefs,
+        "total": len(briefs),
+    }
+
+
 @mcp.tool(description="Rebuild the session search index from storage files")
 def rebuild_search_index() -> Dict[str, Any]:
     """
