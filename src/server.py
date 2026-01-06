@@ -1110,14 +1110,15 @@ def export_session(
 
 
 @mcp.tool(
-    description="Get brief summaries for multiple sessions - title + first user request only. Use for summarization instead of get_session to avoid context explosion."
+    description="Get conversation summaries for sessions - all user messages (truncated) + assistant response endings. Ideal for summarization without full content explosion."
 )
 def get_session_briefs(
     session_ids: Optional[List[str]] = None,
     project_id: Optional[str] = None,
     date: Optional[str] = None,
     limit: int = 20,
-    max_request_chars: int = 300,
+    max_msg_chars: int = 300,
+    max_assistant_chars: int = 200,
 ) -> Dict[str, Any]:
     init_db()
 
@@ -1156,25 +1157,34 @@ def get_session_briefs(
         for row in rows:
             session_id = row["id"]
 
-            first_user_msg = conn.execute(
-                "SELECT id FROM messages WHERE session_id = ? AND role = 'user' ORDER BY created ASC LIMIT 1",
+            messages = conn.execute(
+                "SELECT id, role FROM messages WHERE session_id = ? ORDER BY created ASC",
                 (session_id,),
-            ).fetchone()
+            ).fetchall()
 
-            user_request = ""
-            if first_user_msg:
+            conversation = []
+            for msg in messages:
                 text_parts = conn.execute(
                     "SELECT content FROM parts WHERE message_id = ? AND type = 'text' ORDER BY id ASC",
-                    (first_user_msg["id"],),
+                    (msg["id"],),
                 ).fetchall()
+                full_text = " ".join(p["content"] for p in text_parts).strip()
 
-                user_request = " ".join(p["content"] for p in text_parts)
-                if len(user_request) > max_request_chars:
-                    user_request = user_request[:max_request_chars] + "..."
+                if not full_text:
+                    continue
 
-            msg_count = conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)
-            ).fetchone()[0]
+                if msg["role"] == "user":
+                    if len(full_text) > max_msg_chars:
+                        truncated = full_text[:max_msg_chars] + "..."
+                    else:
+                        truncated = full_text
+                    conversation.append({"role": "user", "text": truncated})
+                elif msg["role"] == "assistant":
+                    if len(full_text) > max_assistant_chars:
+                        truncated = "..." + full_text[-max_assistant_chars:]
+                    else:
+                        truncated = full_text
+                    conversation.append({"role": "assistant", "text": truncated})
 
             briefs.append(
                 {
@@ -1188,11 +1198,9 @@ def get_session_briefs(
                     ).isoformat()
                     if row["updated"]
                     else None,
-                    "user_request": user_request.strip()
-                    if user_request
-                    else "(no user message)",
+                    "conversation": conversation,
                     "stats": {
-                        "messages": msg_count,
+                        "messages": len(messages),
                         "additions": row["additions"],
                         "deletions": row["deletions"],
                         "files": row["files_changed"],
