@@ -1214,6 +1214,8 @@ def list_projects() -> Dict[str, Any]:
 # =============================================================================
 
 if __name__ == "__main__":
+    import sys
+
     # Initialize database on startup
     init_db()
 
@@ -1221,17 +1223,27 @@ if __name__ == "__main__":
     with get_db() as conn:
         count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         if count == 0:
-            print("Index empty, rebuilding from storage...")
+            # Only print to stderr in stdio mode to avoid corrupting the protocol
+            transport = os.environ.get("MCP_TRANSPORT", "stdio")
+            if transport != "stdio":
+                print("Index empty, rebuilding from storage...")
             result = rebuild_index()
-            print(
-                f"Indexed {result['sessions']} sessions, {result['messages']} messages, {result['parts']} parts"
-            )
+            if transport != "stdio":
+                print(
+                    f"Indexed {result['sessions']} sessions, {result['messages']} messages, {result['parts']} parts"
+                )
 
-    port = int(os.environ.get("PORT", 8000))
-    host = "0.0.0.0"
+    # Transport modes:
+    # - stdio (default): local MCP integration with opencode
+    # - streamable-http: remote deployment (Render, Poke, etc.)
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
 
-    print(f"Starting OpenCode Sessions MCP on {host}:{port}")
-    print(f"Storage: {STORAGE_DIR}")
-    print(f"Cache: {CACHE_DB}")
-
-    mcp.run(transport="http", host=host, port=port, stateless_http=True)
+    if transport in ("http", "streamable-http"):
+        port = int(os.environ.get("PORT", 8000))
+        host = "0.0.0.0"
+        print(f"Starting OpenCode Sessions MCP on {host}:{port}")
+        print(f"Storage: {STORAGE_DIR}")
+        print(f"Cache: {CACHE_DB}")
+        mcp.run(transport="streamable-http", host=host, port=port)
+    else:
+        mcp.run(transport="stdio", show_banner=False)
